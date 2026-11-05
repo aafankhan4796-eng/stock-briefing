@@ -1,11 +1,13 @@
-# AI Stock Briefing
+# 📈 Stock Trading Companion
 
-**Type a company name, get a one-page research briefing: live price, what moves the stock, what to watch, Wall Street's view and the latest news.**
+**An AI research companion for investors: type any company and get a one-page briefing with the live price, what moves the stock, what to watch, Wall Street's view and the latest news.**
+
+🔗 **Live app:** [aafan-stock-briefing.streamlit.app](https://aafan-stock-briefing.streamlit.app)
 
 ![App screenshot](docs/app.png)
 
 ## Why I built it
-Researching a stock means jumping between price charts, analyst pages, news sites and company reports. This tool pulls the key information into one briefing in seconds, written so a non-expert can understand what drives the business and what the market expects.
+Researching a stock means jumping between price charts, analyst pages, news sites and company reports. My companion pulls the key information into one briefing in seconds, written so a non-expert can understand what drives the business and what the market expects.
 
 ## What you get
 1. **Snapshot:** price and daily change, day and 52-week range, market cap, P/E, dividend yield, beta
