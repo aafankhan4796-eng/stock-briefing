@@ -8,7 +8,7 @@ from .drivers import sector_view, signals
 from .models import StockData
 
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-DISCLAIMER = ("This briefing is for research and education only. It is not financial advice "
+DISCLAIMER = ("This companion is for research and education only. It is not financial advice "
               "and does not recommend buying or selling any security. Data may be delayed or incomplete.")
 
 RATING_LABELS = {
