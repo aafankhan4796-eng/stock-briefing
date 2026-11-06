@@ -3,11 +3,13 @@
 Run locally:  streamlit run personal.py
 Deploy as a second Streamlit app with these secrets:
     APP_PASSWORD = "choose-your-own"
-    WATCHLIST = "ASML.AS, ADYEN.AS, NVDA, AAPL, MSFT"
+    WATCHLIST = "NVDA, MU, ASML.AS"   # optional: replaces the default groups below
 """
 
 import hmac
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import date
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,10 +17,19 @@ import streamlit as st
 
 from briefing import data
 from briefing.demo import demo_history, demo_stock
-from briefing.report import DISCLAIMER, RATING_LABELS, build_markdown, money
+from briefing.report import DISCLAIMER, RATING_LABELS, build_markdown
 
 MINT, AMBER, RED, MUTED, GRID = "#3DDC97", "#F5B841", "#FF6B6B", "#8A9BB8", "rgba(138,155,184,0.15)"
-DEFAULT_WATCHLIST = "ASML.AS, ADYEN.AS, NVDA, AAPL, MSFT"
+GROUPS = {
+    "Market": ["^GSPC", "^IXIC"],
+    "AI & chips": ["NVDA", "AMD", "AVGO", "TSM", "ARM", "ASML.AS", "QCOM"],
+    "Memory": ["MU", "000660.KS", "005930.KS", "SNDK"],
+    "Big tech / AI": ["MSFT", "GOOGL", "META", "AMZN", "AAPL"],
+    "Other": ["ADYEN.AS"],
+}
+INDEX_NAMES = {"^GSPC": "S&P 500", "^IXIC": "Nasdaq Composite"}
+SHORT = {"000660.KS": "SK hynix", "005930.KS": "Samsung", "ASML.AS": "ASML", "ADYEN.AS": "Adyen"}
+GROUP_OF = {t: g for g, ts in GROUPS.items() for t in ts}
 
 st.set_page_config(page_title="My Trading Companion", page_icon="📈", layout="wide")
 
@@ -67,14 +78,17 @@ st.markdown(f"""
 <div class="hero">
   <div class="tag">Personal edition</div>
   <h1>📈 My Trading Companion</h1>
-  <p>Aafan's watchlist: today's moves, analyst targets and what's coming up, on one screen.</p>
+  <p>Aafan's watchlist: the market, AI &amp; chip stocks, memory makers and big tech, on one screen.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ---------- watchlist state ----------
 if "watchlist" not in st.session_state:
-    raw = secret("WATCHLIST", DEFAULT_WATCHLIST)
-    st.session_state.watchlist = [t.strip().upper() for t in str(raw).split(",") if t.strip()]
+    raw = secret("WATCHLIST")
+    if raw:
+        st.session_state.watchlist = [t.strip().upper() for t in str(raw).split(",") if t.strip()]
+    else:
+        st.session_state.watchlist = [t for ts in GROUPS.values() for t in ts]
 
 with st.sidebar:
     st.header("Watchlist")
@@ -97,16 +111,24 @@ with st.sidebar:
     if keep != st.session_state.watchlist:
         st.session_state.watchlist = keep
         st.rerun()
-    st.caption("Changes last for this visit. To save them, paste this into the app's secrets as WATCHLIST:")
+    st.caption("Changes last for this visit. To save a custom list, paste this into the app's secrets as WATCHLIST:")
     st.code(", ".join(st.session_state.watchlist) or "-", language=None)
     if st.button("Refresh prices"):
         st.cache_data.clear()
         st.rerun()
 
 
+def _load_one(symbol):
+    try:
+        return symbol, data.fetch(symbol), data.history(symbol, "3mo"), None
+    except Exception as e:
+        return symbol, None, None, str(e)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def load(symbol):
-    return data.fetch(symbol), data.history(symbol, "3mo")
+def load_all(symbols):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(_load_one, symbols))
 
 
 def load_demo(symbol, i):
@@ -121,15 +143,18 @@ def load_demo(symbol, i):
 
 rows, stocks, errors = [], {}, []
 with st.spinner("Your companion is checking your watchlist..."):
-    for i, sym in enumerate(st.session_state.watchlist):
-        try:
-            s, h = load_demo(sym, i) if demo else load(sym)
-        except Exception as e:
-            errors.append(f"{sym}: {e}")
+    syms = tuple(st.session_state.watchlist)
+    results = [(t, *load_demo(t, i), None) for i, t in enumerate(syms)] if demo else load_all(syms)
+    for sym, s, h, err in results:
+        if err or s is None:
+            errors.append(f"{sym}: {err}")
             continue
+        if sym in INDEX_NAMES:
+            s = replace(s, name=INDEX_NAMES[sym])
         stocks[sym] = (s, h)
         a = s.analyst
         rows.append({
+            "Group": GROUP_OF.get(sym, "Added"),
             "Ticker": sym,
             "Company": s.name,
             "Price": s.price,
@@ -140,7 +165,7 @@ with st.spinner("Your companion is checking your watchlist..."):
             "Analyst view": RATING_LABELS.get((a.recommendation or "none").lower(), "n/a"),
             "Avg target": a.target_mean,
             "Upside to target %": s.upside_to_target_pct,
-            "Next earnings": s.next_earnings or "",
+            "Next earnings": (s.next_earnings or "")[:10],
         })
 
 for e in errors:
@@ -153,21 +178,41 @@ if not rows:
 df = pd.DataFrame(rows)
 
 # ---------- headline metrics ----------
-moves = df.dropna(subset=["Today %"])
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Stocks tracked", len(df))
-c2.metric("Up today", int((moves["Today %"] > 0).sum()), f"{int((moves['Today %'] < 0).sum())} down",
+idx = df[df["Ticker"].isin(list(INDEX_NAMES))]
+stk = df[~df["Ticker"].isin(list(INDEX_NAMES))]
+moves = stk.dropna(subset=["Today %"])
+c1, c2, c3, c4, c5 = st.columns(5)
+for col, (_, r) in zip((c1, c2), idx.iterrows()):
+    col.metric(r["Company"], f"{r['Price']:,.0f}" if pd.notna(r["Price"]) else "n/a",
+               f"{r['Today %']:+.2f}%" if pd.notna(r["Today %"]) else None)
+c3.metric("Stocks up today", int((moves["Today %"] > 0).sum()), f"{int((moves['Today %'] < 0).sum())} down",
           delta_color="off")
 if len(moves):
     best = moves.loc[moves["Today %"].idxmax()]
     worst = moves.loc[moves["Today %"].idxmin()]
-    c3.metric("Best today", best["Ticker"], f"{best['Today %']:+.2f}%")
-    c4.metric("Worst today", worst["Ticker"], f"{worst['Today %']:+.2f}%")
+    c4.metric("Best today", SHORT.get(best["Ticker"], best["Ticker"]), f"{best['Today %']:+.2f}%")
+    c5.metric("Worst today", SHORT.get(worst["Ticker"], worst["Ticker"]), f"{worst['Today %']:+.2f}%")
+
+# ---------- sector averages ----------
+sec = moves.groupby("Group")["Today %"].mean().dropna()
+if len(sec) > 1:
+    st.markdown("## How each group did today")
+    sec = sec.sort_values()
+    fig_s = go.Figure(go.Bar(x=sec.values, y=sec.index, orientation="h",
+                             marker_color=[MINT if v >= 0 else RED for v in sec.values],
+                             text=[f"{v:+.2f}%" for v in sec.values], textposition="outside"))
+    fig_s.update_layout(height=60 + 40 * len(sec), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED), margin=dict(l=10, r=40, t=10, b=10))
+    fig_s.update_xaxes(gridcolor=GRID, zeroline=True, zerolinecolor=MUTED, ticksuffix="%")
+    st.plotly_chart(fig_s, width="stretch")
 
 # ---------- watchlist table ----------
 st.markdown("## Your watchlist")
+groups = ["All"] + [g for g in list(GROUPS) + ["Added"] if g in set(df["Group"])]
+view = st.segmented_control("Show", groups, default="All") or "All"
+shown = df if view == "All" else df[df["Group"] == view]
 st.dataframe(
-    df, hide_index=True, width="stretch",
+    shown, hide_index=True, width="stretch", height=min(38 * (len(shown) + 1) + 4, 760),
     column_config={
         "Price": st.column_config.NumberColumn(format="%.2f"),
         "Today %": st.column_config.NumberColumn(format="%+.2f%%"),
@@ -181,11 +226,12 @@ st.dataframe(
 )
 
 # ---------- upcoming earnings ----------
-upcoming = df[df["Next earnings"] != ""].sort_values("Next earnings")
+today = date.today().isoformat()
+upcoming = df[df["Next earnings"] >= today].sort_values("Next earnings")
 if len(upcoming):
     st.markdown("## Coming up")
-    for _, r in upcoming.iterrows():
-        st.markdown(f"- **{r['Next earnings'][:10]}**: {r['Company']} ({r['Ticker']}) reports earnings")
+    for _, r in upcoming.head(8).iterrows():
+        st.markdown(f"- **{r['Next earnings']}**: {r['Company']} ({r['Ticker']}) reports earnings")
 
 # ---------- deep dive ----------
 st.markdown("## Deep dive")
